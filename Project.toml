@@ -1,0 +1,4 @@
+name = "EncapExperimentHelper"
+uuid = "e74caba0-ccb2-4e96-b6f2-3025f658d8be"
+authors = ["Lukas Reich <lukasbannenberg@gmail.com>"]
+version = "0.1.0"

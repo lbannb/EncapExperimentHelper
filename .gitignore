@@ -1,0 +1,3 @@
+# A package resolves its dependencies against the consuming project's environment,
+# so the Manifest is machine-specific and not part of the package.
+Manifest.toml

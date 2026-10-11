@@ -68,6 +68,47 @@ end
 
     # a bad value is a parse error, not a silent default
     @test_throws ArgumentError EEH.apply_cli_overrides!(defaults(), ["--maxiter", "abc"]; io = devnull)
+    @test_throws ArgumentError EEH.apply_cli_overrides!(defaults(), ["--flat", "maybe"]; io = devnull)
+end
+
+@testset "parse_as" begin
+    for (str, value) in ("yes" => true, "On" => true, "1" => true, "no" => false, "off" => false)
+        @test EEH.parse_as(false, str, :flag) === value
+    end
+    @test EEH.parse_as(1 // 2, "3/4", :sz) === 3 // 4
+    @test EEH.parse_as(1 // 2, "-1//2", :sz) === -1 // 2
+    @test EEH.parse_as(1 // 2, "2", :sz) === 2 // 1
+    @test_throws ArgumentError EEH.parse_as(1 // 2, "1/0", :sz)
+
+    # a default of nothing is an optional parameter
+    @test EEH.parse_as(nothing, "none", :sz) === nothing
+    @test EEH.parse_as(nothing, "nothing", :sz) === nothing
+    @test EEH.parse_as(nothing, "3", :sz) === 3
+    @test EEH.parse_as(nothing, "1/2", :sz) === 1 // 2
+    @test EEH.parse_as(nothing, "0.25", :sz) === 0.25
+    @test_throws ArgumentError EEH.parse_as(nothing, "abc", :sz)
+end
+
+@testset "apply_env_overrides!" begin
+    params = Dict{Symbol,Any}(:Lx => 6, :J2 => 0.125, :sz_sector => nothing, :fix_peps => false)
+    env = Dict("PPEPS_LX" => "8", "PPEPS_J2" => "0", "PPEPS_SZ_SECTOR" => "1/2",
+               "PPEPS_FIX_PEPS" => "yes", "PPEPS_UNRELATED" => "ignored", "LX" => "99")
+    io = IOBuffer()
+    EEH.apply_env_overrides!(params; prefix = "PPEPS_", env, io)
+    @test params[:Lx] === 8
+    @test params[:J2] === 0.0
+    @test params[:sz_sector] === 1 // 2
+    @test params[:fix_peps] === true
+    log = String(take!(io))
+    @test occursin("Environment override: Lx = 8 (was 6, from PPEPS_LX)", log)
+    @test count("Environment override", log) == 4
+
+    # the command line, applied afterwards, has the last word
+    EEH.apply_cli_overrides!(params, ["--Lx", "10"]; io = devnull)
+    @test params[:Lx] === 10
+
+    # without a prefix the bare upper-cased key is used
+    @test EEH.apply_env_overrides!(Dict{Symbol,Any}(:Lx => 6); env, io = devnull)[:Lx] === 99
 end
 
 @testset "run_tag" begin
@@ -168,6 +209,12 @@ end
         @test err isa ErrorException
         @test occursin("out of range for a sweep of 2", err.msg)
         @test occursin("ENCAP_PROCID=2", err.msg)
+    end
+
+    with_procid(3) do
+        ctx = EEH.encap_context(run_dir)
+        @test EEH.instance_seed(ctx, 12_500) == 42_500
+        @test EEH.instance_seed(ctx, 7; stride = 1) == 10
     end
 
     had = haskey(ENV, "SLURM_CPUS_PER_TASK")
@@ -310,6 +357,64 @@ end
 
         EEH.save_checkpoint(save_file, Dict("theta" => [7.0]); atomic = false)
         @test EEH.load_checkpoint(save_file)["theta"] == [7.0]
+    end
+end
+
+@testset "snapshots" begin
+    _, run_dir = fake_run_dir()
+    with_procid(0) do
+        ctx = EEH.encap_context(run_dir)
+        dir = EEH.snapshot_dir(ctx, "peps", "L=4x4_D=2")
+        @test dir == joinpath(ctx.data_dir, "peps_L=4x4_D=2_snapshots")
+        @test EEH.list_snapshots(dir) == Tuple{Int,String}[]     # not written yet
+
+        for it in (100, 25, 5)
+            EEH.save_checkpoint(EEH.snapshot_file(ctx, "peps", "L=4x4_D=2", it),
+                                Dict("iteration" => it))
+        end
+        write(joinpath(dir, "notes.txt"), "not a snapshot")
+        snapshots = EEH.list_snapshots(dir)
+        @test first.(snapshots) == [5, 25, 100]                  # numeric, not lexical
+        @test last(snapshots)[2] == joinpath(dir, "iteration_100.jld2")
+        @test EEH.load_checkpoint(last(snapshots)[2])["iteration"] == 100
+    end
+end
+
+@testset "check_compatible" begin
+    saved = Dict("Lx" => 4, "Ly" => 4, "J2" => 0.0)               # as read back from JLD2
+    current = Dict{Symbol,Any}(:Lx => 4, :Ly => 4, :J2 => 0.0, :bdim => 3)
+    @test EEH.check_compatible(saved, current, [:Lx, :Ly, :J2]) === nothing
+    @test EEH.check_compatible((Lx = 4, Ly = 4), current, [:Lx, :Ly]) === nothing
+
+    err = try
+        EEH.check_compatible(Dict(:Lx => 6, :Ly => 4, :J2 => 0.125), current, [:Lx, :Ly, :J2];
+                             what = "checkpoint")
+    catch e
+        e
+    end
+    @test err isa ErrorException
+    @test occursin("checkpoint does not match", err.msg)
+    @test occursin("Lx: 6 in the checkpoint, 4 now", err.msg)
+    @test occursin("J2: 0.125 in the checkpoint, 0.0 now", err.msg)
+    @test !occursin("Ly:", err.msg)
+
+    # a key missing on one side is a mismatch, not a crash
+    @test_throws ErrorException EEH.check_compatible(saved, current, [:bdim])
+end
+
+@testset "setup_workers" begin
+    ws = EEH.setup_workers(threads = 2, procs = 1, blas_threads = 1, modules = [:Test])
+    try
+        @test length(ws) == 1
+        w = only(ws)
+        @test EEH.Distributed.remotecall_fetch(() -> Threads.nthreads(), w) == 2
+        @test EEH.Distributed.remotecall_fetch(() -> isdefined(Main, :Test), w)
+        @test EEH.Distributed.remotecall_fetch(
+            () -> Main.LinearAlgebra.BLAS.get_num_threads(), w) == 1
+        @test EEH.Distributed.remotecall_fetch(() -> Base.active_project(), w) ==
+              Base.active_project()
+    finally
+        EEH.Distributed.rmprocs(ws)
     end
 end
 

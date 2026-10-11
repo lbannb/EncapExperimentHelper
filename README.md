@@ -81,6 +81,30 @@ Through encap, the `-a` value needs a **leading space**, which stops encap from 
 encap rerun run.jl -sl_i 4 -n "peps_only_evolve" -a " --lr 0.01 --maxiter 500"
 ```
 
+`apply_env_overrides!` does the same from environment variables `<prefix><KEY>`, which
+reach a job without encap's argument parsing (`sbatch --export`, a wrapper script). Call it
+first, so the command line wins. Besides the types above, both accept `Rational`s
+(`1/2`), `yes/no` and `on/off` for `Bool`s, and a default of `nothing` for an optional
+parameter (`none` keeps it unset; anything else is read as a number):
+
+```julia
+EEH.apply_env_overrides!(params; prefix = "PPEPS_")   # PPEPS_LX=8 PPEPS_SZ_SECTOR=1/2
+EEH.apply_cli_overrides!(params)
+Random.seed!(EEH.instance_seed(ctx, 12_500))           # 12_500 + 10_000 * ENCAP_PROCID
+```
+
+### Workers — `setup_workers`
+
+Starts `procs` workers with `threads` Julia threads each, loads `modules` on them, pins
+their BLAS to one thread and gives the driver `blas_threads` (default: the whole
+allocation). This is the layout the QuantumNaturalfPEPS samplers expect. Workers start in
+the driver's active project, so a script with its own environment gets the same package
+versions everywhere:
+
+```julia
+EEH.setup_workers(threads = 8, modules = [:QuantumNaturalfPEPS])  # cpus_per_task() ÷ 8 workers
+```
+
 ### Tags — `run_tag`
 
 One string derived from the run parameters, shared by the log, the checkpoints and the data
@@ -128,6 +152,27 @@ of truncating it:
 ```julia
 EEH.append_data(results, Dict("params" => params, "θ_history" => θ_hist, "E_history" => E);
                 cols = ["θ_history"], vecs = ["E_history"])
+```
+
+### Snapshots and compatibility — `snapshot_file`, `list_snapshots`, `check_compatible`
+
+The checkpoint is overwritten every iteration; snapshots are kept, so a later run can
+re-measure the state along the optimisation with many more samples. They go to
+`<data_dir>/<name>_<tag>_snapshots/iteration_<n>.jld2`, in the shared folder, because the
+run that measures them is not the run that wrote them. `list_snapshots` returns them sorted
+by iteration number.
+
+`check_compatible(saved, current, keys)` throws, listing every mismatch, unless a saved
+state and the current run agree on `keys` — the guard before resuming or starting from
+another run's result:
+
+```julia
+EEH.save_checkpoint(EEH.snapshot_file(ctx, "peps", tag, niter), Dict("θ" => θ, "params" => params))
+for (iteration, path) in EEH.list_snapshots(EEH.snapshot_dir(ctx, "peps", tag))
+    snapshot = EEH.load_checkpoint(path)
+    EEH.check_compatible(snapshot["params"], params, [:Lx, :Ly, :bdim])
+    # ... measure ...
+end
 ```
 
 ### Dispatch — `select_run`

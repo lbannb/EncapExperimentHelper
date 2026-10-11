@@ -22,6 +22,73 @@ data_file(ctx::EncapContext, name::AbstractString, tag; suffix::AbstractString =
     joinpath(ctx.data_dir, string(name, "_", run_tag(tag), suffix, ".jld2"))
 
 """
+    snapshot_file(ctx, name, tag, iteration) -> String
+
+Path of the snapshot taken at `iteration`:
+`<data_dir>/<name>_<tag>_snapshots/iteration_<iteration>.jld2`.
+
+Unlike the checkpoint, which every iteration overwrites, snapshots are kept, so a later
+run can re-evaluate the state along the optimisation, e.g. with many more samples than
+one optimisation step can afford. They sit in the shared `data/` folder for the same
+reason as [`data_file`](@ref): the run that measures them is not the run that wrote them.
+"""
+snapshot_file(ctx::EncapContext, name::AbstractString, tag, iteration::Integer) =
+    joinpath(snapshot_dir(ctx, name, tag), "iteration_$(iteration).jld2")
+
+"""
+    snapshot_dir(ctx, name, tag) -> String
+
+The folder holding the snapshots of [`snapshot_file`](@ref).
+"""
+snapshot_dir(ctx::EncapContext, name::AbstractString, tag) =
+    joinpath(ctx.data_dir, string(name, "_", run_tag(tag), "_snapshots"))
+
+"""
+    list_snapshots(dir) -> Vector{Tuple{Int,String}}
+
+The `iteration_<n>.jld2` files in `dir` as `(n, path)` pairs, sorted by iteration number
+(sorting by name would put `iteration_100` before `iteration_25`). Empty when the folder
+does not exist yet.
+"""
+function list_snapshots(dir::AbstractString)
+    snapshots = Tuple{Int,String}[]
+    isdir(dir) || return snapshots
+    for file in readdir(dir)
+        m = match(r"^iteration_(\d+)\.jld2$", file)
+        m === nothing || push!(snapshots, (parse(Int, m.captures[1]), joinpath(dir, file)))
+    end
+    return sort!(snapshots; by = first)
+end
+
+"""
+    check_compatible(saved, current, keys; what="saved state") -> nothing
+
+Throw unless `saved` and `current` agree on every key in `keys` — the guard before
+continuing from a checkpoint or starting from another run's result, where a state saved
+for another lattice or coupling would otherwise be picked up without complaint. Both may
+be dicts (with `Symbol` or `String` keys) or named tuples; the error lists every
+mismatch, not just the first.
+
+```julia
+EncapExperimentHelper.check_compatible(ckpt["params"], params, [:Lx, :Ly, :J1, :J2, :bdim])
+```
+"""
+function check_compatible(saved, current, keys; what::AbstractString = "saved state")
+    mismatches = String[]
+    for key in keys
+        a, b = lookup_param(saved, key), lookup_param(current, key)
+        isequal(a, b) || push!(mismatches, "  $key: $(repr(a)) in the $what, $(repr(b)) now")
+    end
+    isempty(mismatches) ||
+        error("The $what does not match the current run:\n" * join(mismatches, "\n"))
+    return nothing
+end
+
+lookup_param(x::AbstractDict, key) =
+    haskey(x, Symbol(key)) ? x[Symbol(key)] : get(x, string(key), missing)
+lookup_param(x::NamedTuple, key) = get(x, Symbol(key), missing)
+
+"""
     load_checkpoint(path) -> Dict{String,Any} or nothing
 
 Contents of the checkpoint at `path`, or `nothing` when there is none — so a run can

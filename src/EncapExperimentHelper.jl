@@ -33,7 +33,9 @@ See `examples/joint_sampling_common.jl` for a full setup file written against it
 """
 module EncapExperimentHelper
 
+import Distributed
 import JLD2
+import LinearAlgebra
 
 include("context.jl")
 include("params.jl")
@@ -41,5 +43,6 @@ include("tags.jl")
 include("logs.jl")
 include("checkpoints.jl")
 include("dispatch.jl")
+include("workers.jl")
 
 end # module

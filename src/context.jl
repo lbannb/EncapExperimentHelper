@@ -183,6 +183,19 @@ function sweep(ctx::EncapContext, values)
 end
 
 """
+    instance_seed(ctx, base; stride=10_000) -> Int
+
+A random seed for this instance, `base + stride * procid`: the instances of a sweep draw
+independent samples, while a rerun of the same instance repeats its own seed.
+
+```julia
+Random.seed!(EncapExperimentHelper.instance_seed(ctx, 12_500))
+```
+"""
+instance_seed(ctx::EncapContext, base::Integer; stride::Integer = 10_000) =
+    Int(base + stride * ctx.procid)
+
+"""
     cpus_per_task(default=Sys.CPU_THREADS) -> Int
 
 `SLURM_CPUS_PER_TASK` as an `Int`, falling back to `default` outside a SLURM
